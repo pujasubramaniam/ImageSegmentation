@@ -1,0 +1,169 @@
+---
+title: "Project"
+date: "4/8/2020"
+output: word_document
+---
+
+Image Segmentation Using Thresholding
+```{r}
+
+library(igraph)
+library(imager)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(magick)
+
+#create function that uses tresholding to segment image
+seg_threshold = function(image) {
+  pic = load.image(image)
+  pic = resize(pic, size_x = 128, size_y = 128) #standardize image size
+  pic.df = as.data.frame(pic) #turn image into a data frame
+  pic_hist = hist(pic) #histogram of image
+  pic_dens = density(pic.df$value) #calculate density of the data frame 
+  threshold = mean(pic_hist$breaks) #define the threshold to be the mean of the histogram
+  pic.df$rgb = 0
+  pic.df[pic.df$value > threshold,]$rgb = "blue" 
+  pic.df[pic.df$value <= threshold,]$rgb = "red" 
+  #return(as.cimg(pic.df) %>% plot)
+  p1 = ggplot(pic.df,aes(x,y)) +  geom_raster(aes(fill=rgb)) + scale_fill_identity(labels = c("foreground","background"), guide = "legend")
+  plot(p1+scale_y_reverse() + theme(axis.line=element_blank(),axis.text.x=element_blank(),axis.text.y=element_blank(),axis.ticks=element_blank(),axis.title.x=element_blank(),axis.title.y=element_blank()))
+}
+```  
+
+
+```{r}
+#Test each image
+seg_threshold("Pic1.jpg")
+seg_threshold("Pic2.jpg")
+seg_threshold("Pic3.jpg")
+seg_threshold("Pic4.jpg")
+```
+
+
+Image Segmentation Using Min-cut/Max-flow
+```{r}
+#create function that uses min-cut/max-flow to separate foreground and background
+
+pic_max = function(image){
+
+pic = load.image(image)
+pic = resize(pic, size_x = 128, size_y = 128) #standardize size of pic
+pic_col = ncol(pic)
+pic_row = nrow(pic)
+pic.df = as.data.frame(pic)
+pic.n = nrow(pic.df)
+
+#create bounding box (to encapsulate foreground)
+#divide by the 4 sides of the image pixel, and find center (assuming image is in the center of the picture)
+x_bound = c(round(pic_col/4),round(pic_col/4)*3)
+y_bound = c(round(pic_row/4),round(pic_row/4)*3)
+
+#separate the foreground based on the bounded values
+pic.df$in_fg = as.integer((pic.df$x>x_bound[1] & pic.df$x<x_bound[2]) & (pic.df$y>y_bound[1] & pic.df$y<y_bound[2]))
+#pic.df = pic.df %>% mutate(in_fg = as.integer((x>x_bound[1] & x<x_bound[2]) & (y>y_bound[1] & y<y_bound[2])))
+
+
+#Using average pixels to use to calculate a and b
+avg_pixel_fore = mean(filter(pic.df, pic.df$in_fg == 1)$value)
+avg_pixel_back = mean(filter(pic.df, pic.df$in_fg == 0)$value)
+pic_intensity = pic.df$value
+
+#calculate a and b using given equations
+pic.df$a = -log10(abs(pic_intensity - avg_pixel_fore)/(abs(pic_intensity - avg_pixel_fore)+abs(pic_intensity - avg_pixel_back)))
+
+pic.df$b = -log10(abs(pic_intensity - avg_pixel_back)/(abs(pic_intensity - avg_pixel_fore)+abs(pic_intensity - avg_pixel_back)))
+
+#define K and sigma values as given  
+K = 0.01
+sigma = 1
+
+#final edge values
+source_total = c()
+target_total = c()
+weight = c()
+
+#create for loop for each pixel
+#connected nodes are i and j, source node is s, sink node is t
+for (i in 1:pic.n){
+    s = c() #represents source pixel/from which pixel
+    t = c() #to which pixel
+    w = c() #weight of each pixel to be calculated using Cij = K*exp(-(pic_intensity[i] - pic_intensity[j])^2/sigma^2))
+    
+    #source is not first pixel
+    if (i - 1 > 0){
+      j = i - 1 #find prior pixel
+      #append new edge
+      s = c(s, i)
+      t = c(t, j)
+      w = c(w, K*exp(-(pic_intensity[i] - pic_intensity[j])^2/sigma^2))
+    }
+    
+    #check neighbors of source pixel
+    if (i + 1 <= pic.n){
+      j = i + 1 #get the next pixel
+      s = c(s, i)
+      t = c(t, j)
+      w = c(w, K*exp(-(pic_intensity[i] - pic_intensity[j])^2/sigma^2))
+    }
+    
+    #first column: no left neighbors
+    if (i - pic_row > 0){
+      j = i - pic_row
+      s = c(s, i)
+      t = c(t, j)
+      w = c(w, K*exp(-(pic_intensity[i] - pic_intensity[j])^2/sigma^2))
+    }
+    
+    #last column: no right neighbors
+    if (i + pic_row <= pic.n){
+      j = i + pic_row
+      s = c(s, i)
+      t = c(t, j)
+      w = c(w, K*exp(-(pic_intensity[i] - pic_intensity[j])^2/sigma^2))
+    }
+    
+    source_total = c(source_total, s)
+    target_total = c(target_total, t)
+    weight = c(weight, w)
+  }
+  
+  source_total = c(source_total, rep("s",pic.n), c(1:pic.n))
+  target_total = c(target_total, c(1:pic.n), rep("t",pic.n))
+  weight = c(weight, pic.df$a, pic.df$b)
+  link = as.data.frame(cbind(source_total, target_total, weight))
+  graph = graph_from_data_frame(d=link)
+  
+  #using max_flow function in library to determine path and max possible flow for separation
+  sol = max_flow(graph, source='s', target='t', capacity=weight)
+  
+  #separate foreground and bacground by color
+  fg = as.vector(sol$partition1[sol$partition1 < pic.n + 1])
+  bg = as.vector(sol$partition2[sol$partition2 < pic.n+ 1])
+  pic.df$rgb = 0
+  pic.df[fg,]$rgb = "blue" 
+  pic.df[bg,]$rgb = "red"
+  
+  #show original image and segemented image side by side
+  #create segmented image plot
+  p2 = ggplot(pic.df,aes(x,y))+geom_raster(aes(fill=rgb))+scale_fill_identity()+theme(aspect.ratio=1)+ggtitle("Segmented")
+  p2 = p2+scale_y_reverse()
+
+  #show input image
+  origim = image_read(image)
+  origim = image_ggplot(origim)+theme_classic()+ggtitle("Input")
+  return(ggarrange(origim, p2))
+
+}
+
+```
+
+```{r}
+#Test each image 
+pic_max("Pic1.jpg")
+pic_max("Pic2.jpg")
+pic_max("Pic3.jpg")
+pic_max("Pic4.jpg")
+```
+
+
